@@ -153,15 +153,39 @@ public class InfluxDBImpl implements InfluxDB {
 	public void write(final BatchPoints batchPoints) {
 		this.batchedCount.addAndGet(batchPoints.getPoints().size());
 		TypedString lineProtocol = new TypedString(batchPoints.lineProtocol());
-		this.influxDBService.writePoints(
-				this.username,
-				this.password,
-				batchPoints.getDatabase(),
-				batchPoints.getRetentionPolicy(),
-				TimeUtil.toTimePrecision(TimeUnit.NANOSECONDS),
-				batchPoints.getConsistency().value(),
-				lineProtocol);
-
+		long backoff = 500;   // half of initial back-off time when being back pressured (in milliseconds)
+		while (true) {
+		    try {
+		        this.influxDBService.writePoints(
+				    this.username,
+				    this.password,
+				    batchPoints.getDatabase(),
+				    batchPoints.getRetentionPolicy(),
+				    TimeUtil.toTimePrecision(TimeUnit.NANOSECONDS),
+				    batchPoints.getConsistency().value(),
+				    lineProtocol);
+		        break;    // success
+		    } catch (RuntimeException e) {
+		        final String errMsg = e.getMessage();
+		        if (!errMsg.contains("WAL backed up flushing to index") && !errMsg.contains("timeout")) {
+		            //
+		            // only handling the two exceptions above; for any other exception,
+		            // throw it up the chain.
+		            //
+		            throw e;
+		        }
+		        try {
+		            backoff = backoff * 2;    // exponentially increasing the back-off time when being back-pressured persistently
+		            System.out.println(
+		                    String.format("Backing off writing batch points for %d second(s) after encountering a runtime exception: %s",
+		                            backoff / 1000, e.getMessage()));
+		            Thread.sleep(backoff);
+		        } catch (InterruptedException ie) {
+		            // ignore
+		        }
+		        continue;
+		    }
+		}
 	}
 
 	/**
